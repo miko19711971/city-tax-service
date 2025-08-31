@@ -3,54 +3,63 @@ const Stripe  = require('stripe');
 
 const app = express();
 
-// ── ENV ───────────────────────────────────────────────────────────────────────
+// ── ENV
 const PORT   = process.env.PORT || 10000;
 const BASE_URL = process.env.BASE_URL || `http://localhost:${PORT}`;
+const STRIPE_SECRET_KEY  = process.env.STRIPE_SECRET_KEY || '';
+const PAYPAL_ME_USERNAME = process.env.PAYPAL_ME_USERNAME || 'micheleb469';
 
-const STRIPE_SECRET_KEY   = process.env.STRIPE_SECRET_KEY;            // sk_test_... / sk_live_...
-const PAYPAL_ME_USERNAME  = process.env.PAYPAL_ME_USERNAME || "micheleb469";
+const RATE_LEONINA     = parseFloat(process.env.RATE_LEONINA_EUR   || 6);
+const RATE_STANDARD    = parseFloat(process.env.RATE_STANDARD_EUR  || 5);
+const SURCHARGE_STRIPE = parseFloat(process.env.SURCHARGE_STRIPE_EUR || 1.00);
+const SURCHARGE_PAYPAL = parseFloat(process.env.SURCHARGE_PAYPAL_EUR || 1.40);
 
-const RATE_LEONINA        = parseFloat(process.env.RATE_LEONINA_EUR   || 6);
-const RATE_STANDARD       = parseFloat(process.env.RATE_STANDARD_EUR  || 5);
-const SURCHARGE_STRIPE    = parseFloat(process.env.SURCHARGE_STRIPE_EUR || 1.00);
-const SURCHARGE_PAYPAL    = parseFloat(process.env.SURCHARGE_PAYPAL_EUR || 1.40);
-
-// Stripe SDK (solo se c'è la chiave)
 const stripe = STRIPE_SECRET_KEY ? new Stripe(STRIPE_SECRET_KEY) : null;
 
-// ── HELPERS ──────────────────────────────────────────────────────────────────
-function toEur(n) {
-  return Number((+n).toFixed(2));
-}
-function getRate(listing) {
-  return (String(listing).toLowerCase() === 'leonina') ? RATE_LEONINA : RATE_STANDARD;
-}
+// ── HELPERS
+const toEur = n => Number((+n).toFixed(2));
+const getRate = listing => (String(listing).toLowerCase() === 'leonina' ? RATE_LEONINA : RATE_STANDARD);
 
-// ── HEALTHCHECK ──────────────────────────────────────────────────────────────
-app.get('/health', (req, res) => {
-  res.json({ ok: true, service: 'city-tax-service' });
+// ── HOME (niente più "Cannot GET /")
+app.get('/', (req, res) => {
+  res.send(`
+    <h3>city-tax-service ✅</h3>
+    <p>Try:</p>
+    <ul>
+      <li>/health</li>
+      <li>/pay/paypal?listing=standard&guests=2&nights=3</li>
+      <li>/pay/stripe?listing=leonina&guests=2&nights=3&res=TEST123</li>
+    </ul>
+  `);
 });
 
-// ── STRIPE: crea Checkout Session e reindirizza ──────────────────────────────
+// ── HEALTH
+app.get('/health', (req, res) => res.json({ ok: true, service: 'city-tax-service' }));
+
+// ── STRIPE
 app.get('/pay/stripe', async (req, res) => {
+  const { listing = 'standard', guests = 1, nights = 1, res: reservationId = '' } = req.query;
+
+  const rate       = getRate(listing);
+  const baseAmount = toEur(Number(guests) * Number(nights) * rate);
+  if (!baseAmount || baseAmount <= 0) return res.status(400).send('Invalid amount.');
+
+  const totalAmount = toEur(baseAmount + SURCHARGE_STRIPE);
+
+  // Se Stripe non è configurato, non fermarti: torna il JSON come la versione “vecchia”
+  if (!stripe) {
+    return res.json({
+      provider: 'stripe',
+      listing, guests, nights,
+      reservationId,
+      baseAmount,
+      surcharge: SURCHARGE_STRIPE,
+      totalAmount,
+      message: 'Stripe not configured (missing STRIPE_SECRET_KEY). Returning computed totals only.'
+    });
+  }
+
   try {
-    if (!stripe) {
-      return res.status(500).send('Stripe is not configured. Missing STRIPE_SECRET_KEY.');
-    }
-
-    const {
-      listing = 'standard',
-      guests  = 1,
-      nights  = 1,
-      res: reservationId = ''
-    } = req.query;
-
-    const rate       = getRate(listing);
-    const baseAmount = toEur(rate * Number(guests) * Number(nights));
-    if (!baseAmount || baseAmount <= 0) return res.status(400).send('Invalid amount.');
-
-    const totalAmount = toEur(baseAmount + SURCHARGE_STRIPE);
-
     const session = await stripe.checkout.sessions.create({
       mode: 'payment',
       currency: 'eur',
@@ -58,7 +67,7 @@ app.get('/pay/stripe', async (req, res) => {
         quantity: 1,
         price_data: {
           currency: 'eur',
-          unit_amount: Math.round(totalAmount * 100), // in centesimi
+          unit_amount: Math.round(totalAmount * 100),
           product_data: {
             name: 'Tourist Tax (City Tax)',
             description: reservationId
@@ -73,48 +82,43 @@ app.get('/pay/stripe', async (req, res) => {
 
     return res.redirect(303, session.url);
   } catch (err) {
-    console.error('Stripe error:', err);
-    return res.status(500).send('Stripe error.');
+    console.error('Stripe error:', err && err.message);
+    // Fallback: non far fallire il flusso, mostra il calcolo
+    return res.json({
+      provider: 'stripe',
+      listing, guests, nights,
+      reservationId,
+      baseAmount,
+      surcharge: SURCHARGE_STRIPE,
+      totalAmount,
+      error: 'Stripe checkout creation failed',
+      details: String(err && err.message || err)
+    });
   }
 });
 
-// ── PAYPAL.ME: calcola importo e reindirizza ─────────────────────────────────
+// ── PAYPAL
 app.get('/pay/paypal', (req, res) => {
-  const {
-    listing = 'standard',
-    guests  = 1,
-    nights  = 1,
-    res: reservationId = ''
-  } = req.query;
+  const { listing = 'standard', guests = 1, nights = 1 } = req.query;
 
   const rate       = getRate(listing);
-  const baseAmount = toEur(rate * Number(guests) * Number(nights));
+  const baseAmount = toEur(Number(guests) * Number(nights) * rate);
   if (!baseAmount || baseAmount <= 0) return res.status(400).send('Invalid amount.');
 
   const totalAmount = toEur(baseAmount + SURCHARGE_PAYPAL);
-  // PayPal.Me usa il punto per i decimali
   const url = `https://www.paypal.me/${PAYPAL_ME_USERNAME}/${totalAmount.toFixed(2)}`;
 
-  // Nota: PayPal.Me non supporta una "causale"; mettila nella mail HostAway.
   return res.redirect(302, url);
 });
 
-// ── PAGINE DI ESITO SEMPLICI ─────────────────────────────────────────────────
+// ── ESITI
 app.get('/success', (req, res) => {
   const { res: reservationId = '', amt = '' } = req.query;
-  res.send(`
-    <h3>Payment received ✅</h3>
-    ${reservationId ? `<p>Reservation: ${reservationId}</p>` : ''}
-    ${amt ? `<p>Amount: €${amt}</p>` : ''}
-    <p>Thank you! We will remit the city tax to the Municipality.</p>
-  `);
+  res.send(`<h3>Payment received ✅</h3>
+            ${reservationId ? `<p>Reservation: ${reservationId}</p>` : ''}
+            ${amt ? `<p>Amount: €${amt}</p>` : ''}`);
 });
+app.get('/cancel', (req, res) => res.send('<h3>Payment canceled</h3>'));
 
-app.get('/cancel', (req, res) => {
-  res.send('<h3>Payment canceled</h3><p>You can close this page and try again later.</p>');
-});
-
-// ── START ────────────────────────────────────────────────────────────────────
-app.listen(PORT, () => {
-  console.log(`City-tax-service listening on ${PORT}`);
-});
+// ── START
+app.listen(PORT, () => console.log(`City-tax-service listening on ${PORT}`));
