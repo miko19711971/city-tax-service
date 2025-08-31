@@ -1,1 +1,13 @@
-
+{
+  "name": "city-tax-service",
+  "version": "1.0.0",
+  "description": "Microservizio per gestire i pagamenti della tassa di soggiorno con Stripe e PayPal",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "stripe": "^12.0.0"
+  }
+}
