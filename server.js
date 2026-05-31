@@ -66,11 +66,14 @@ app.get('/pay/stripe', async (req, res) => {
     listing = 'standard',
     guests = 1,
     nights = 1,
+    net: netParam = null,
     res: reservationId = ''
   } = req.query;
 
   const rate       = getRate(listing);
-  const baseNet    = toEur(Number(guests) * Number(nights) * rate); // quello che vuoi incassare
+  const baseNet    = netParam !== null
+    ? toEur(Number(netParam))
+    : toEur(Number(guests) * Number(nights) * rate);
   if (!baseNet || baseNet <= 0) return res.status(400).send('Invalid amount.');
 
   // Calcolo il lordo da mostrare in checkout per incassare baseNet dopo le fee Stripe
@@ -127,10 +130,12 @@ app.get('/pay/stripe', async (req, res) => {
 
 /* ─────────── PAYPAL.ME (NET→GROSS REDIRECT) ─────────── */
 app.get('/pay/paypal', (req, res) => {
-  const { listing = 'standard', guests = 1, nights = 1 } = req.query;
+  const { listing = 'standard', guests = 1, nights = 1, net: netParam = null } = req.query;
 
   const rate    = getRate(listing);
-  const baseNet = toEur(Number(guests) * Number(nights) * rate); // netto desiderato
+  const baseNet = netParam !== null
+    ? toEur(Number(netParam))
+    : toEur(Number(guests) * Number(nights) * rate);
   if (!baseNet || baseNet <= 0) return res.status(400).send('Invalid amount.');
 
   // Calcolo lordo per coprire fee PayPal
