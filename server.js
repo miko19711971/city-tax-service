@@ -16,13 +16,12 @@ const PAYPAL_ME_USERNAME = process.env.PAYPAL_ME_USERNAME || 'MicheleB496';
 const RATE_LEONINA  = parseFloat(process.env.RATE_LEONINA_EUR  || 6);
 const RATE_STANDARD = parseFloat(process.env.RATE_STANDARD_EUR || 5);
 
-// Commissioni PROCESSORI (percentuali come 0.014 = 1.4%)
-const STRIPE_FEE_PCT = parseFloat(process.env.STRIPE_FEE_PCT || 0.014); // 1.4% tipico UE
+// Commissioni PROCESSORI — tassi reali da transazioni verificate
+const STRIPE_FEE_PCT = parseFloat(process.env.STRIPE_FEE_PCT || 0.0327); // 3.27% non-EU (es. USA)
 const STRIPE_FEE_FIX = parseFloat(process.env.STRIPE_FEE_FIX_EUR || 0.25); // €0.25
 
-// Nota: dallo screenshot PayPal trattiene ~€3.58 su €60 (≈5.97% tot).
-// Imposto default prudente 5.9% + €0.35. Personalizza su Render se serve.
-const PAYPAL_FEE_PCT = parseFloat(process.env.PAYPAL_FEE_PCT || 0.059); // 5.9%
+// PayPal: 5.4% + €0.35 verificato su transazione reale (Mikaela Burrows, Australia)
+const PAYPAL_FEE_PCT = parseFloat(process.env.PAYPAL_FEE_PCT || 0.054); // 5.4%
 const PAYPAL_FEE_FIX = parseFloat(process.env.PAYPAL_FEE_FIX_EUR || 0.35); // €0.35
 
 /* ─────────── Stripe SDK ─────────── */
