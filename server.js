@@ -30,7 +30,7 @@ const stripe = STRIPE_SECRET_KEY ? new Stripe(STRIPE_SECRET_KEY) : null;
 /* ─────────── HELPERS ─────────── */
 const toEur = n => Number((+n).toFixed(2));
 const getRate = (listing) =>
-  String(listing).toLowerCase() === 'leonina' ? RATE_LEONINA : RATE_STANDARD;
+  String(listing).toLowerCase().includes('leonina') ? RATE_LEONINA : RATE_STANDARD;
 
 /**
  * Calcola il lordo da far pagare per ottenere 'net' dopo una fee % + fissA.
