@@ -1,7 +1,7 @@
 // server.js — City Tax Service (net-to-gross fees)
 
 const express = require('express');
-const Stripe  = require('stripe');
+const https   = require('https');
 
 const app = express();
 
@@ -20,46 +20,60 @@ const RATE_LEONINA  = parseFloat(process.env.RATE_LEONINA_EUR  || 6);
 const RATE_STANDARD = parseFloat(process.env.RATE_STANDARD_EUR || 5);
 
 // Commissioni PROCESSORI — tassi reali da transazioni verificate
-const STRIPE_FEE_PCT = parseFloat(process.env.STRIPE_FEE_PCT || 0.0327); // 3.27% non-EU (es. USA)
+const STRIPE_FEE_PCT = parseFloat(process.env.STRIPE_FEE_PCT || 0.0327); // 3.27% non-EU
 const STRIPE_FEE_FIX = parseFloat(process.env.STRIPE_FEE_FIX_EUR || 0.25); // €0.25
 
-// PayPal: 5.4% + €0.35 verificato su transazione reale (Mikaela Burrows, Australia)
-const PAYPAL_FEE_PCT = parseFloat(process.env.PAYPAL_FEE_PCT || 0.054); // 5.4%
-const PAYPAL_FEE_FIX = parseFloat(process.env.PAYPAL_FEE_FIX_EUR || 0.35); // €0.35
+// PayPal: 5.4% + €0.35 verificato su transazione reale
+const PAYPAL_FEE_PCT = parseFloat(process.env.PAYPAL_FEE_PCT || 0.054);
+const PAYPAL_FEE_FIX = parseFloat(process.env.PAYPAL_FEE_FIX_EUR || 0.35);
 
 /* ─────────── HELPERS ─────────── */
-const toEur    = n => Number((+n).toFixed(2));
+const toEur     = n => Number((+n).toFixed(2));
 const isLeonina = listing => String(listing).toLowerCase().includes('leonina');
 const getRate   = listing => isLeonina(listing) ? RATE_LEONINA : RATE_STANDARD;
 
-// Restituisce l'istanza Stripe giusta in base all'appartamento
-function getStripe(listing) {
-  const key = isLeonina(listing) ? STRIPE_SECRET_KEY_LEONINA : STRIPE_SECRET_KEY;
-  return key ? new Stripe(key) : null;
+function getStripeKey(listing) {
+  return isLeonina(listing) ? STRIPE_SECRET_KEY_LEONINA : STRIPE_SECRET_KEY;
 }
 
-/**
- * Calcola il lordo da far pagare per ottenere 'net' dopo una fee % + fissa.
- * Formula: gross = (net + fee_fix) / (1 - fee_pct)
- * Arrotondo SEMPRE verso l'alto al centesimo per coprire arrotondamenti del gateway.
- */
 function grossForNet(net, feePct, feeFix) {
   if (net <= 0) return 0;
   const raw = (net + feeFix) / (1 - feePct);
   return Math.ceil(raw * 100) / 100;
 }
 
+// Chiama Stripe API direttamente via HTTPS (evita problemi connessione SDK su Render)
+function stripePost(path, params, secretKey) {
+  return new Promise((resolve, reject) => {
+    const body = new URLSearchParams(params).toString();
+    const options = {
+      hostname: 'api.stripe.com',
+      path,
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${secretKey}`,
+        'Content-Type': 'application/x-www-form-urlencoded',
+        'Content-Length': Buffer.byteLength(body),
+      },
+    };
+    const req = https.request(options, (res) => {
+      let data = '';
+      res.on('data', chunk => data += chunk);
+      res.on('end', () => {
+        try { resolve(JSON.parse(data)); }
+        catch (e) { reject(e); }
+      });
+    });
+    req.on('error', reject);
+    req.setTimeout(15000, () => { req.destroy(); reject(new Error('Stripe request timeout')); });
+    req.write(body);
+    req.end();
+  });
+}
+
 /* ─────────── ROUTES ─────────── */
 app.get('/', (req, res) => {
-  res.send(`
-    <h3>city-tax-service ✅</h3>
-    <p>Try:</p>
-    <ul>
-      <li>/health</li>
-      <li>/pay/paypal?listing=standard&guests=2&nights=3</li>
-      <li>/pay/stripe?listing=leonina&guests=2&nights=3&res=TEST123</li>
-    </ul>
-  `);
+  res.send(`<h3>city-tax-service ✅</h3><p>Try /pay/stripe?listing=leonina&guests=2&nights=3&res=TEST123</p>`);
 });
 
 app.get('/health', (req, res) =>
@@ -76,64 +90,53 @@ app.get('/pay/stripe', async (req, res) => {
     res: reservationId = ''
   } = req.query;
 
-  const rate       = getRate(listing);
-  const baseNet    = netParam !== null
+  const rate    = getRate(listing);
+  const baseNet = netParam !== null
     ? toEur(Number(netParam))
     : toEur(Number(guests) * Number(nights) * rate);
   if (!baseNet || baseNet <= 0) return res.status(400).send('Invalid amount.');
 
-  // Calcolo il lordo da mostrare in checkout per incassare baseNet dopo le fee Stripe
-  const totalGross = toEur(grossForNet(baseNet, STRIPE_FEE_PCT, STRIPE_FEE_FIX));
+  const totalGross  = toEur(grossForNet(baseNet, STRIPE_FEE_PCT, STRIPE_FEE_FIX));
+  const amountCents = Math.round(totalGross * 100);
+  const secretKey   = getStripeKey(listing);
 
-  // Seleziona il conto Stripe in base all'appartamento
-  const stripe = getStripe(listing);
-  const accountLabel = isLeonina(listing) ? 'LEONINA (Stella Bondi)' : 'principale';
-  console.log(`🔑 Stripe account: ${accountLabel} | listing:${listing} | net:${baseNet} | gross:${totalGross}`);
+  console.log(`🔑 Stripe: ${isLeonina(listing) ? 'LEONINA (Stella)' : 'principale'} | net:${baseNet} | gross:${totalGross}`);
 
-  if (!stripe) {
-    return res.json({
-      provider: 'stripe',
-      listing, guests, nights, reservationId,
-      net_wanted: baseNet,
-      fee_pct: STRIPE_FEE_PCT, fee_fix: STRIPE_FEE_FIX,
-      gross_to_charge: totalGross,
+  if (!secretKey) {
+    return res.status(500).json({
       error: isLeonina(listing) ? 'Missing STRIPE_SECRET_KEY_LEONINA' : 'Missing STRIPE_SECRET_KEY'
     });
   }
 
   try {
-    const session = await stripe.checkout.sessions.create({
-      mode: 'payment',
-      currency: 'eur',
-      line_items: [{
-        quantity: 1,
-        price_data: {
-          currency: 'eur',
-          unit_amount: Math.round(totalGross * 100), // centesimi
-          product_data: {
-            name: 'Tassa di soggiorno - Roma',
-            description: reservationId
-              ? `Prenotazione ${reservationId}`
-              : `Net €${baseNet.toFixed(2)}`
-          }
-        }
-      }],
-      success_url: `${BASE_URL}/success?res=${encodeURIComponent(reservationId)}&net=${baseNet.toFixed(2)}&gross=${totalGross.toFixed(2)}&provider=stripe`,
-      cancel_url:  `${BASE_URL}/cancel?res=${encodeURIComponent(reservationId)}`
-    });
+    const params = new URLSearchParams();
+    params.append('mode', 'payment');
+    params.append('payment_method_types[]', 'card');
+    params.append('line_items[0][price_data][currency]', 'eur');
+    params.append('line_items[0][price_data][unit_amount]', String(amountCents));
+    params.append('line_items[0][price_data][product_data][name]', 'Tassa di soggiorno - Roma');
+    params.append('line_items[0][price_data][product_data][description]',
+      reservationId ? `Prenotazione ${reservationId}` : `Net €${baseNet.toFixed(2)}`);
+    params.append('line_items[0][quantity]', '1');
+    if (reservationId) {
+      params.append('metadata[reservation_id]', reservationId);
+      params.append('payment_intent_data[metadata][reservation_id]', reservationId);
+    }
+    params.append('success_url', `${BASE_URL}/success?res=${encodeURIComponent(reservationId)}&net=${baseNet.toFixed(2)}&gross=${totalGross.toFixed(2)}&provider=stripe`);
+    params.append('cancel_url',  `${BASE_URL}/cancel?res=${encodeURIComponent(reservationId)}`);
 
+    const session = await stripePost('/v1/checkout/sessions', Object.fromEntries(params), secretKey);
+
+    if (session.error) {
+      console.error('Stripe error:', session.error.message);
+      return res.status(500).json({ error: 'Stripe checkout creation failed', details: session.error.message });
+    }
+
+    console.log(`💳 Session: ${session.id} | res:${reservationId} | EUR ${totalGross}`);
     return res.redirect(303, session.url);
   } catch (err) {
-    console.error('Stripe error:', err?.message || err);
-    return res.json({
-      provider: 'stripe',
-      listing, guests, nights, reservationId,
-      net_wanted: baseNet,
-      fee_pct: STRIPE_FEE_PCT, fee_fix: STRIPE_FEE_FIX,
-      gross_to_charge: totalGross,
-      error: 'Stripe checkout creation failed',
-      details: String(err?.message || err)
-    });
+    console.error('Stripe error:', err.message);
+    return res.status(500).json({ error: 'Stripe checkout creation failed', details: err.message });
   }
 });
 
@@ -147,34 +150,26 @@ app.get('/pay/paypal', (req, res) => {
     : toEur(Number(guests) * Number(nights) * rate);
   if (!baseNet || baseNet <= 0) return res.status(400).send('Invalid amount.');
 
-  // Calcolo lordo per coprire fee PayPal
   const totalGross = toEur(grossForNet(baseNet, PAYPAL_FEE_PCT, PAYPAL_FEE_FIX));
-
-  // Seleziona l'account PayPal.me in base all'appartamento
-  const username = isLeonina(listing) && PAYPAL_ME_USERNAME_LEONINA
+  const username   = isLeonina(listing) && PAYPAL_ME_USERNAME_LEONINA
     ? PAYPAL_ME_USERNAME_LEONINA
     : PAYPAL_ME_USERNAME;
 
-  console.log(`💙 PayPal account: ${username} | listing:${listing} | net:${baseNet} | gross:${totalGross}`);
-
-  const url = `https://www.paypal.me/${username}/${totalGross.toFixed(2)}`;
-  return res.redirect(302, url);
+  console.log(`💙 PayPal: ${username} | listing:${listing} | net:${baseNet} | gross:${totalGross}`);
+  return res.redirect(302, `https://www.paypal.me/${username}/${totalGross.toFixed(2)}`);
 });
 
 /* ─────────── ESITI ─────────── */
 app.get('/success', (req, res) => {
   const { res: reservationId = '', net = '', gross = '', provider = '' } = req.query;
-  res.send(
-    `<h3>Payment received ✅</h3>
-     ${reservationId ? `<p>Reservation: ${reservationId}</p>` : ''}
-     ${provider ? `<p>Provider: ${provider}</p>` : ''}
-     ${net ? `<p>Net expected: €${net}</p>` : ''}
-     ${gross ? `<p>Charged gross: €${gross}</p>` : ''}`
-  );
+  res.send(`<h3>Pagamento ricevuto ✅</h3>
+    ${reservationId ? `<p>Prenotazione: ${reservationId}</p>` : ''}
+    ${net ? `<p>Tassa: €${net}</p>` : ''}
+    ${gross ? `<p>Pagato: €${gross}</p>` : ''}`);
 });
 
 app.get('/cancel', (req, res) =>
-  res.send('<h3>Payment canceled</h3>')
+  res.send('<h3>Pagamento annullato ❌</h3><p>Puoi riprovare usando il link ricevuto via email.</p>')
 );
 
 /* ─────────── START ─────────── */
