@@ -9,8 +9,11 @@ const app = express();
 const PORT     = process.env.PORT || 10000;
 const BASE_URL = process.env.BASE_URL || `http://localhost:${PORT}`;
 
-const STRIPE_SECRET_KEY  = process.env.STRIPE_SECRET_KEY || '';
-const PAYPAL_ME_USERNAME = process.env.PAYPAL_ME_USERNAME || 'MicheleB496';
+const STRIPE_SECRET_KEY         = process.env.STRIPE_SECRET_KEY         || '';
+const STRIPE_SECRET_KEY_LEONINA = process.env.STRIPE_SECRET_KEY_LEONINA || '';
+
+const PAYPAL_ME_USERNAME         = process.env.PAYPAL_ME_USERNAME         || 'MicheleB496';
+const PAYPAL_ME_USERNAME_LEONINA = process.env.PAYPAL_ME_USERNAME_LEONINA || '';
 
 // Tariffe (netto desiderato = guests * nights * rate)
 const RATE_LEONINA  = parseFloat(process.env.RATE_LEONINA_EUR  || 6);
@@ -24,23 +27,26 @@ const STRIPE_FEE_FIX = parseFloat(process.env.STRIPE_FEE_FIX_EUR || 0.25); // �
 const PAYPAL_FEE_PCT = parseFloat(process.env.PAYPAL_FEE_PCT || 0.054); // 5.4%
 const PAYPAL_FEE_FIX = parseFloat(process.env.PAYPAL_FEE_FIX_EUR || 0.35); // €0.35
 
-/* ─────────── Stripe SDK ─────────── */
-const stripe = STRIPE_SECRET_KEY ? new Stripe(STRIPE_SECRET_KEY) : null;
-
 /* ─────────── HELPERS ─────────── */
-const toEur = n => Number((+n).toFixed(2));
-const getRate = (listing) =>
-  String(listing).toLowerCase().includes('leonina') ? RATE_LEONINA : RATE_STANDARD;
+const toEur    = n => Number((+n).toFixed(2));
+const isLeonina = listing => String(listing).toLowerCase().includes('leonina');
+const getRate   = listing => isLeonina(listing) ? RATE_LEONINA : RATE_STANDARD;
+
+// Restituisce l'istanza Stripe giusta in base all'appartamento
+function getStripe(listing) {
+  const key = isLeonina(listing) ? STRIPE_SECRET_KEY_LEONINA : STRIPE_SECRET_KEY;
+  return key ? new Stripe(key) : null;
+}
 
 /**
- * Calcola il lordo da far pagare per ottenere 'net' dopo una fee % + fissA.
+ * Calcola il lordo da far pagare per ottenere 'net' dopo una fee % + fissa.
  * Formula: gross = (net + fee_fix) / (1 - fee_pct)
  * Arrotondo SEMPRE verso l'alto al centesimo per coprire arrotondamenti del gateway.
  */
 function grossForNet(net, feePct, feeFix) {
   if (net <= 0) return 0;
   const raw = (net + feeFix) / (1 - feePct);
-  return Math.ceil(raw * 100) / 100; // arrotondo up a 2 decimali
+  return Math.ceil(raw * 100) / 100;
 }
 
 /* ─────────── ROUTES ─────────── */
@@ -79,15 +85,19 @@ app.get('/pay/stripe', async (req, res) => {
   // Calcolo il lordo da mostrare in checkout per incassare baseNet dopo le fee Stripe
   const totalGross = toEur(grossForNet(baseNet, STRIPE_FEE_PCT, STRIPE_FEE_FIX));
 
+  // Seleziona il conto Stripe in base all'appartamento
+  const stripe = getStripe(listing);
+  const accountLabel = isLeonina(listing) ? 'LEONINA (Stella Bondi)' : 'principale';
+  console.log(`🔑 Stripe account: ${accountLabel} | listing:${listing} | net:${baseNet} | gross:${totalGross}`);
+
   if (!stripe) {
-    // Fallback se manca la chiave: mostra i calcoli (non dovrebbe capitare in produzione)
     return res.json({
       provider: 'stripe',
       listing, guests, nights, reservationId,
       net_wanted: baseNet,
       fee_pct: STRIPE_FEE_PCT, fee_fix: STRIPE_FEE_FIX,
       gross_to_charge: totalGross,
-      error: 'Missing STRIPE_SECRET_KEY'
+      error: isLeonina(listing) ? 'Missing STRIPE_SECRET_KEY_LEONINA' : 'Missing STRIPE_SECRET_KEY'
     });
   }
 
@@ -101,9 +111,9 @@ app.get('/pay/stripe', async (req, res) => {
           currency: 'eur',
           unit_amount: Math.round(totalGross * 100), // centesimi
           product_data: {
-            name: 'Tourist Tax (City Tax)',
+            name: 'Tassa di soggiorno - Roma',
             description: reservationId
-              ? `Reservation ${reservationId} — net €${baseNet.toFixed(2)}`
+              ? `Prenotazione ${reservationId}`
               : `Net €${baseNet.toFixed(2)}`
           }
         }
@@ -112,7 +122,6 @@ app.get('/pay/stripe', async (req, res) => {
       cancel_url:  `${BASE_URL}/cancel?res=${encodeURIComponent(reservationId)}`
     });
 
-    // Redirect diretto al Checkout Stripe
     return res.redirect(303, session.url);
   } catch (err) {
     console.error('Stripe error:', err?.message || err);
@@ -140,8 +149,15 @@ app.get('/pay/paypal', (req, res) => {
 
   // Calcolo lordo per coprire fee PayPal
   const totalGross = toEur(grossForNet(baseNet, PAYPAL_FEE_PCT, PAYPAL_FEE_FIX));
-  const url = `https://www.paypal.me/${PAYPAL_ME_USERNAME}/${totalGross.toFixed(2)}`;
 
+  // Seleziona l'account PayPal.me in base all'appartamento
+  const username = isLeonina(listing) && PAYPAL_ME_USERNAME_LEONINA
+    ? PAYPAL_ME_USERNAME_LEONINA
+    : PAYPAL_ME_USERNAME;
+
+  console.log(`💙 PayPal account: ${username} | listing:${listing} | net:${baseNet} | gross:${totalGross}`);
+
+  const url = `https://www.paypal.me/${username}/${totalGross.toFixed(2)}`;
   return res.redirect(302, url);
 });
 
