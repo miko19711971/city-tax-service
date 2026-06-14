@@ -9,8 +9,8 @@ const app = express();
 const PORT     = process.env.PORT || 10000;
 const BASE_URL = process.env.BASE_URL || `http://localhost:${PORT}`;
 
-const STRIPE_SECRET_KEY         = process.env.STRIPE_SECRET_KEY         || '';
-const STRIPE_SECRET_KEY_LEONINA = process.env.STRIPE_SECRET_KEY_LEONINA || '';
+const STRIPE_SECRET_KEY         = (process.env.STRIPE_SECRET_KEY         || '').trim();
+const STRIPE_SECRET_KEY_LEONINA = (process.env.STRIPE_SECRET_KEY_LEONINA || '').trim();
 
 const PAYPAL_ME_USERNAME         = process.env.PAYPAL_ME_USERNAME         || 'MicheleB496';
 const PAYPAL_ME_USERNAME_LEONINA = process.env.PAYPAL_ME_USERNAME_LEONINA || '';
